@@ -355,6 +355,7 @@ const styles = {
     borderRadius: "999px",
     background: "#e5e7eb",
     fontSize: "14px",
+    color: "#111827",
   },
   grid: {
     display: "grid",
@@ -399,12 +400,15 @@ const styles = {
     padding: "12px",
     fontSize: "16px",
     background: "#f9fafb",
+    color: "#111827",
+    WebkitTextFillColor: "#111827",
   },
   time: {
     textAlign: "center",
     fontSize: "42px",
     fontWeight: 700,
     letterSpacing: "1px",
+    color: "#111827",
   },
   timeInputRow: {
     display: "grid",
@@ -420,6 +424,8 @@ const styles = {
     fontSize: "18px",
     textAlign: "center",
     background: "#f9fafb",
+    color: "#111827",
+    WebkitTextFillColor: "#111827",
   },
   buttonRow: {
     display: "grid",
