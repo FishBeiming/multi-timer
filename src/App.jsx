@@ -142,7 +142,7 @@ export default function App() {
   function handleNameChange(id, value) {
     updateTimer(id, (timer) => ({
       ...timer,
-      name: value.slice(0, 24) || `计时器 ${id}`,
+      name: value.slice(0, 24),
     }));
   }
 
