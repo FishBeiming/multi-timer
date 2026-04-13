@@ -3,17 +3,25 @@ import React, { useEffect, useMemo, useState } from "react";
 const TIMER_COUNT = 30;
 const STORAGE_KEY = "multi-timer-vite-simple-v1";
 
+const TIMER_PHASE = {
+  COUNTDOWN: "countdown",
+  OVERTIME: "overtime",
+  STOPPED: "stopped",
+};
+
 function makeTimer(index) {
   return {
     id: index + 1,
     name: `计时器 ${index + 1}`,
     initialSeconds: 300,
     remainingSeconds: 300,
+    overtimeSeconds: 0,
     minuteInput: "05",
     secondInput: "00",
+    phase: TIMER_PHASE.COUNTDOWN,
     isRunning: false,
-    isFinished: false,
     endAt: null,
+    overtimeStartedAt: null,
   };
 }
 
@@ -48,40 +56,118 @@ function secondsFromInput(minuteInput, secondInput) {
   return Number(minuteInput || 0) * 60 + Number(secondInput || 0);
 }
 
+function migrateTimer(rawTimer, index) {
+  const base = makeTimer(index);
+  const merged = { ...base, ...rawTimer };
+  const phase = Object.values(TIMER_PHASE).includes(merged.phase)
+    ? merged.phase
+    : merged.isFinished
+      ? TIMER_PHASE.STOPPED
+      : TIMER_PHASE.COUNTDOWN;
+
+  return {
+    ...merged,
+    phase,
+    remainingSeconds: Number.isFinite(merged.remainingSeconds)
+      ? Math.max(0, Math.floor(merged.remainingSeconds))
+      : merged.initialSeconds,
+    overtimeSeconds: Number.isFinite(merged.overtimeSeconds)
+      ? Math.max(0, Math.floor(merged.overtimeSeconds))
+      : 0,
+    isRunning: Boolean(merged.isRunning) && phase !== TIMER_PHASE.STOPPED,
+    endAt: Number.isFinite(merged.endAt) ? merged.endAt : null,
+    overtimeStartedAt: Number.isFinite(merged.overtimeStartedAt) ? merged.overtimeStartedAt : null,
+  };
+}
+
 function commitTimerTime(timer) {
   const minuteInput = cleanInput(timer.minuteInput, 99) || "0";
   const secondInput = cleanInput(timer.secondInput, 59) || "0";
   const total = secondsFromInput(minuteInput, secondInput);
+  const shouldResetCountdown = timer.phase !== TIMER_PHASE.OVERTIME && !timer.isRunning;
 
   return {
     ...timer,
     minuteInput: pad(Number(minuteInput)),
     secondInput: pad(Number(secondInput)),
     initialSeconds: total,
-    remainingSeconds: timer.isRunning ? timer.remainingSeconds : total,
-    isFinished: false,
+    remainingSeconds: shouldResetCountdown ? total : timer.remainingSeconds,
   };
 }
 
 function syncTimer(timer, now) {
-  if (!timer.isRunning || !timer.endAt) return timer;
+  if (!timer.isRunning) return timer;
 
-  const left = Math.max(0, Math.ceil((timer.endAt - now) / 1000));
+  if (timer.phase === TIMER_PHASE.COUNTDOWN) {
+    if (!timer.endAt) {
+      return {
+        ...timer,
+        isRunning: false,
+      };
+    }
 
-  if (left === 0) {
+    const left = Math.max(0, Math.ceil((timer.endAt - now) / 1000));
+
+    if (left === 0) {
+      const overtimeStartedAt = timer.endAt;
+      return {
+        ...timer,
+        remainingSeconds: 0,
+        overtimeSeconds: Math.max(0, Math.floor((now - overtimeStartedAt) / 1000)),
+        phase: TIMER_PHASE.OVERTIME,
+        isRunning: true,
+        endAt: null,
+        overtimeStartedAt,
+      };
+    }
+
     return {
       ...timer,
-      remainingSeconds: 0,
-      isRunning: false,
-      isFinished: true,
-      endAt: null,
+      remainingSeconds: left,
     };
   }
 
-  return {
-    ...timer,
-    remainingSeconds: left,
-  };
+  if (timer.phase === TIMER_PHASE.OVERTIME) {
+    if (!timer.overtimeStartedAt) {
+      return {
+        ...timer,
+        isRunning: false,
+      };
+    }
+
+    return {
+      ...timer,
+      overtimeSeconds: Math.max(0, Math.floor((now - timer.overtimeStartedAt) / 1000)),
+    };
+  }
+
+  return timer;
+}
+
+function getDisplayTime(timer) {
+  return timer.phase === TIMER_PHASE.OVERTIME
+    ? formatTime(timer.overtimeSeconds)
+    : formatTime(timer.remainingSeconds);
+}
+
+function getStatusText(timer) {
+  if (timer.phase === TIMER_PHASE.OVERTIME) {
+    return timer.isRunning ? "状态：已超时，正计时进行中" : "状态：已超时，正计时已暂停";
+  }
+
+  if (timer.phase === TIMER_PHASE.STOPPED) {
+    return "状态：已结束";
+  }
+
+  if (timer.isRunning) {
+    return "状态：倒计时进行中";
+  }
+
+  if (timer.remainingSeconds === timer.initialSeconds) {
+    return "状态：待开始";
+  }
+
+  return "状态：已暂停";
 }
 
 export default function App() {
@@ -96,12 +182,11 @@ export default function App() {
       }
 
       const now = Date.now();
-      return parsed.map((timer, index) => {
-        const base = { ...makeTimer(index), ...timer };
-        const synced = syncTimer(base, now);
+      return parsed.map((rawTimer, index) => {
+        const synced = syncTimer(migrateTimer(rawTimer, index), now);
         return {
           ...synced,
-          minuteInput: pad(Math.floor((synced.initialSeconds % 3600) / 60)),
+          minuteInput: pad(Math.floor(synced.initialSeconds / 60)),
           secondInput: pad(synced.initialSeconds % 60),
         };
       });
@@ -111,12 +196,12 @@ export default function App() {
   });
 
   useEffect(() => {
-    const id = setInterval(() => {
+    const id = window.setInterval(() => {
       const now = Date.now();
       setTimers((current) => current.map((timer) => syncTimer(timer, now)));
     }, 250);
 
-    return () => clearInterval(id);
+    return () => window.clearInterval(id);
   }, []);
 
   useEffect(() => {
@@ -124,16 +209,15 @@ export default function App() {
   }, [timers]);
 
   useEffect(() => {
-    const finished = timers.filter((item) => item.isFinished);
-    if (finished.length > 0) {
-      document.title = `${finished[finished.length - 1].name} 已结束`;
-    } else {
-      document.title = "多计时器";
-    }
+    const latestOvertime = [...timers].reverse().find((timer) => timer.phase === TIMER_PHASE.OVERTIME);
+    document.title = latestOvertime ? `${latestOvertime.name} 已超时` : "多计时器";
   }, [timers]);
 
-  const runningCount = useMemo(() => timers.filter((t) => t.isRunning).length, [timers]);
-  const finishedCount = useMemo(() => timers.filter((t) => t.isFinished).length, [timers]);
+  const runningCount = useMemo(() => timers.filter((timer) => timer.isRunning).length, [timers]);
+  const overtimeCount = useMemo(
+    () => timers.filter((timer) => timer.phase === TIMER_PHASE.OVERTIME).length,
+    [timers]
+  );
 
   function updateTimer(id, updater) {
     setTimers((current) => current.map((timer) => (timer.id === id ? updater(timer) : timer)));
@@ -166,15 +250,28 @@ export default function App() {
 
   function startTimer(id) {
     updateTimer(id, (timer) => {
+      const now = Date.now();
+
+      if (timer.phase === TIMER_PHASE.OVERTIME) {
+        return {
+          ...timer,
+          isRunning: true,
+          endAt: null,
+          overtimeStartedAt: now - timer.overtimeSeconds * 1000,
+        };
+      }
+
       const startFrom = timer.remainingSeconds > 0 ? timer.remainingSeconds : timer.initialSeconds;
       if (startFrom <= 0) return timer;
 
       return {
         ...timer,
         remainingSeconds: startFrom,
+        overtimeSeconds: 0,
+        phase: TIMER_PHASE.COUNTDOWN,
         isRunning: true,
-        isFinished: false,
-        endAt: Date.now() + startFrom * 1000,
+        endAt: now + startFrom * 1000,
+        overtimeStartedAt: null,
       };
     });
   }
@@ -186,6 +283,7 @@ export default function App() {
         ...synced,
         isRunning: false,
         endAt: null,
+        overtimeStartedAt: null,
       };
     });
   }
@@ -194,29 +292,38 @@ export default function App() {
     updateTimer(id, (timer) => ({
       ...timer,
       remainingSeconds: timer.initialSeconds,
+      overtimeSeconds: 0,
+      phase: TIMER_PHASE.COUNTDOWN,
       isRunning: false,
-      isFinished: false,
       endAt: null,
+      overtimeStartedAt: null,
     }));
   }
 
-  function stopTimer(id) {
+  function finishTimer(id) {
     updateTimer(id, (timer) => ({
       ...timer,
       remainingSeconds: 0,
+      overtimeSeconds: 0,
+      phase: TIMER_PHASE.STOPPED,
       isRunning: false,
-      isFinished: true,
       endAt: null,
+      overtimeStartedAt: null,
     }));
   }
 
-  function stopAll() {
+  function pauseAll() {
+    const now = Date.now();
     setTimers((current) =>
-      current.map((timer) => ({
-        ...timer,
-        isRunning: false,
-        endAt: null,
-      }))
+      current.map((timer) => {
+        const synced = syncTimer(timer, now);
+        return {
+          ...synced,
+          isRunning: false,
+          endAt: null,
+          overtimeStartedAt: null,
+        };
+      })
     );
   }
 
@@ -225,9 +332,11 @@ export default function App() {
       current.map((timer) => ({
         ...timer,
         remainingSeconds: timer.initialSeconds,
+        overtimeSeconds: 0,
+        phase: TIMER_PHASE.COUNTDOWN,
         isRunning: false,
-        isFinished: false,
         endAt: null,
+        overtimeStartedAt: null,
       }))
     );
   }
@@ -238,77 +347,104 @@ export default function App() {
         <div style={styles.header}>
           <div>
             <h1 style={styles.title}>多计时器面板</h1>
-            <p style={styles.subtitle}>30 个独立倒计时器，可单独命名、开始、暂停、重置。</p>
+            <p style={styles.subtitle}>支持同时管理 30 个计时器，结束后自动切换为红色正计时超时显示。</p>
           </div>
 
           <div style={styles.headerButtons}>
             <div style={styles.badge}>运行中 {runningCount}</div>
-            <div style={styles.badge}>已结束 {finishedCount}</div>
-            <button style={styles.secondaryButton} onClick={stopAll}>全部暂停</button>
-            <button style={styles.secondaryButton} onClick={resetAll}>全部重置</button>
+            <div style={{ ...styles.badge, ...styles.badgeOvertime }}>已超时 {overtimeCount}</div>
+            <button style={styles.secondaryButton} onClick={pauseAll}>
+              全部暂停
+            </button>
+            <button style={styles.secondaryButton} onClick={resetAll}>
+              全部重置
+            </button>
           </div>
         </div>
 
         <div style={styles.grid}>
-          {timers.map((timer) => (
-            <div key={timer.id} style={{ ...styles.card, ...(timer.isFinished ? styles.cardFinished : {}) }}>
-              <div style={styles.rowBetween}>
-                <div style={{ flex: 1 }}>
-                  <div style={styles.label}>名称</div>
-                  <input
-                    style={styles.nameInput}
-                    value={timer.name}
-                    onChange={(e) => handleNameChange(timer.id, e.target.value)}
-                  />
+          {timers.map((timer) => {
+            const isOvertime = timer.phase === TIMER_PHASE.OVERTIME;
+            const isStopped = timer.phase === TIMER_PHASE.STOPPED;
+
+            return (
+              <div
+                key={timer.id}
+                style={{
+                  ...styles.card,
+                  ...(isOvertime ? styles.cardOvertime : {}),
+                  ...(isStopped ? styles.cardStopped : {}),
+                }}
+              >
+                <div style={styles.rowBetween}>
+                  <div style={{ flex: 1 }}>
+                    <div style={styles.label}>名称</div>
+                    <input
+                      style={styles.nameInput}
+                      value={timer.name}
+                      onChange={(event) => handleNameChange(timer.id, event.target.value)}
+                    />
+                  </div>
+                  <div style={styles.idBadge}>#{timer.id}</div>
                 </div>
-                <div style={styles.idBadge}>#{timer.id}</div>
-              </div>
 
-              <div style={styles.time}>{formatTime(timer.remainingSeconds)}</div>
-
-              <div style={styles.timeInputRow}>
-                <div>
-                  <div style={styles.label}>分钟</div>
-                  <input
-                    style={styles.smallInput}
-                    inputMode="numeric"
-                    value={timer.minuteInput}
-                    onChange={(e) => handleTimeChange(timer.id, "minuteInput", e.target.value)}
-                    onBlur={() => commitTimeEdit(timer.id)}
-                    onKeyDown={(e) => handleTimeKeyDown(timer.id, e)}
-                  />
+                <div style={styles.timeRow}>
+                  <div style={{ ...styles.time, ...(isOvertime ? styles.timeOvertime : {}) }}>
+                    {getDisplayTime(timer)}
+                  </div>
+                  {isOvertime ? <div style={styles.overtimeTag}>已超时</div> : null}
                 </div>
-                <div>
-                  <div style={styles.label}>秒</div>
-                  <input
-                    style={styles.smallInput}
-                    inputMode="numeric"
-                    value={timer.secondInput}
-                    onChange={(e) => handleTimeChange(timer.id, "secondInput", e.target.value)}
-                    onBlur={() => commitTimeEdit(timer.id)}
-                    onKeyDown={(e) => handleTimeKeyDown(timer.id, e)}
-                  />
+
+                <div style={styles.timeInputRow}>
+                  <div>
+                    <div style={styles.label}>分钟</div>
+                    <input
+                      style={styles.smallInput}
+                      inputMode="numeric"
+                      value={timer.minuteInput}
+                      onChange={(event) => handleTimeChange(timer.id, "minuteInput", event.target.value)}
+                      onBlur={() => commitTimeEdit(timer.id)}
+                      onKeyDown={(event) => handleTimeKeyDown(timer.id, event)}
+                    />
+                  </div>
+                  <div>
+                    <div style={styles.label}>秒</div>
+                    <input
+                      style={styles.smallInput}
+                      inputMode="numeric"
+                      value={timer.secondInput}
+                      onChange={(event) => handleTimeChange(timer.id, "secondInput", event.target.value)}
+                      onBlur={() => commitTimeEdit(timer.id)}
+                      onKeyDown={(event) => handleTimeKeyDown(timer.id, event)}
+                    />
+                  </div>
+                </div>
+
+                <div style={styles.buttonRow}>
+                  {timer.isRunning ? (
+                    <button style={styles.primaryButton} onClick={() => pauseTimer(timer.id)}>
+                      暂停
+                    </button>
+                  ) : (
+                    <button style={styles.primaryButton} onClick={() => startTimer(timer.id)}>
+                      开始
+                    </button>
+                  )}
+                  <button style={styles.secondaryButton} onClick={() => resetTimer(timer.id)}>
+                    重置
+                  </button>
+                </div>
+
+                <button style={{ ...styles.secondaryButton, width: "100%" }} onClick={() => finishTimer(timer.id)}>
+                  立即结束
+                </button>
+
+                <div style={{ ...styles.statusBox, ...(isOvertime ? styles.statusBoxOvertime : {}) }}>
+                  {getStatusText(timer)}
                 </div>
               </div>
-
-              <div style={styles.buttonRow}>
-                {timer.isRunning ? (
-                  <button style={styles.primaryButton} onClick={() => pauseTimer(timer.id)}>暂停</button>
-                ) : (
-                  <button style={styles.primaryButton} onClick={() => startTimer(timer.id)}>开始</button>
-                )}
-                <button style={styles.secondaryButton} onClick={() => resetTimer(timer.id)}>重置</button>
-              </div>
-
-              <button style={{ ...styles.secondaryButton, width: "100%" }} onClick={() => stopTimer(timer.id)}>
-                结束并归零
-              </button>
-
-              <div style={styles.statusBox}>
-                状态：{timer.isRunning ? "倒计时中" : timer.isFinished ? "已结束" : "待开始 / 已暂停"}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       </div>
     </div>
@@ -321,7 +457,9 @@ const styles = {
     background: "#f3f4f6",
     padding: "20px",
     boxSizing: "border-box",
-    fontFamily: "Arial, Helvetica, sans-serif",
+    fontFamily:
+      '"SF Pro Text", "SF Pro Display", "PingFang SC", "Hiragino Sans GB", "Segoe UI", sans-serif',
+    colorScheme: "light",
   },
   container: {
     maxWidth: "1400px",
@@ -332,16 +470,19 @@ const styles = {
     borderRadius: "20px",
     padding: "20px",
     marginBottom: "18px",
-    boxShadow: "0 2px 10px rgba(0,0,0,0.06)",
+    boxShadow: "0 2px 10px rgba(15, 23, 42, 0.08)",
   },
   title: {
     margin: 0,
     fontSize: "28px",
+    color: "#111827",
+    WebkitTextFillColor: "#111827",
   },
   subtitle: {
     margin: "8px 0 0 0",
     color: "#4b5563",
     fontSize: "14px",
+    WebkitTextFillColor: "#4b5563",
   },
   headerButtons: {
     display: "flex",
@@ -356,6 +497,12 @@ const styles = {
     background: "#e5e7eb",
     fontSize: "14px",
     color: "#111827",
+    WebkitTextFillColor: "#111827",
+  },
+  badgeOvertime: {
+    background: "#fee2e2",
+    color: "#b91c1c",
+    WebkitTextFillColor: "#b91c1c",
   },
   grid: {
     display: "grid",
@@ -366,13 +513,18 @@ const styles = {
     background: "#ffffff",
     borderRadius: "20px",
     padding: "18px",
-    boxShadow: "0 2px 10px rgba(0,0,0,0.06)",
+    boxShadow: "0 2px 10px rgba(15, 23, 42, 0.08)",
     display: "flex",
     flexDirection: "column",
     gap: "14px",
+    border: "1px solid #e5e7eb",
   },
-  cardFinished: {
-    outline: "2px solid #d1d5db",
+  cardOvertime: {
+    border: "1px solid #fecaca",
+    boxShadow: "0 6px 18px rgba(185, 28, 28, 0.12)",
+  },
+  cardStopped: {
+    border: "1px solid #d1d5db",
   },
   rowBetween: {
     display: "flex",
@@ -382,7 +534,8 @@ const styles = {
   },
   idBadge: {
     background: "#111827",
-    color: "white",
+    color: "#ffffff",
+    WebkitTextFillColor: "#ffffff",
     borderRadius: "999px",
     padding: "8px 12px",
     fontSize: "13px",
@@ -391,6 +544,7 @@ const styles = {
     fontSize: "12px",
     color: "#6b7280",
     marginBottom: "6px",
+    WebkitTextFillColor: "#6b7280",
   },
   nameInput: {
     width: "100%",
@@ -402,6 +556,15 @@ const styles = {
     background: "#f9fafb",
     color: "#111827",
     WebkitTextFillColor: "#111827",
+    appearance: "none",
+  },
+  timeRow: {
+    minHeight: "64px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: "12px",
+    flexWrap: "wrap",
   },
   time: {
     textAlign: "center",
@@ -409,6 +572,21 @@ const styles = {
     fontWeight: 700,
     letterSpacing: "1px",
     color: "#111827",
+    WebkitTextFillColor: "#111827",
+    fontVariantNumeric: "tabular-nums",
+  },
+  timeOvertime: {
+    color: "#b91c1c",
+    WebkitTextFillColor: "#b91c1c",
+  },
+  overtimeTag: {
+    padding: "8px 12px",
+    borderRadius: "999px",
+    background: "#fee2e2",
+    color: "#b91c1c",
+    WebkitTextFillColor: "#b91c1c",
+    fontSize: "14px",
+    fontWeight: 700,
   },
   timeInputRow: {
     display: "grid",
@@ -426,6 +604,7 @@ const styles = {
     background: "#f9fafb",
     color: "#111827",
     WebkitTextFillColor: "#111827",
+    appearance: "none",
   },
   buttonRow: {
     display: "grid",
@@ -439,7 +618,9 @@ const styles = {
     fontSize: "16px",
     cursor: "pointer",
     background: "#111827",
-    color: "white",
+    color: "#ffffff",
+    WebkitTextFillColor: "#ffffff",
+    appearance: "none",
   },
   secondaryButton: {
     border: "1px solid #d1d5db",
@@ -447,8 +628,10 @@ const styles = {
     padding: "12px 14px",
     fontSize: "16px",
     cursor: "pointer",
-    background: "white",
+    background: "#ffffff",
     color: "#111827",
+    WebkitTextFillColor: "#111827",
+    appearance: "none",
   },
   statusBox: {
     background: "#f9fafb",
@@ -456,5 +639,11 @@ const styles = {
     padding: "12px",
     fontSize: "14px",
     color: "#4b5563",
+    WebkitTextFillColor: "#4b5563",
+  },
+  statusBoxOvertime: {
+    background: "#fef2f2",
+    color: "#b91c1c",
+    WebkitTextFillColor: "#b91c1c",
   },
 };
